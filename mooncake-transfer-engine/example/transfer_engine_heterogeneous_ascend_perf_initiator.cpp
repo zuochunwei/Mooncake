@@ -191,7 +191,7 @@ int initiator() {
     void *hostAddr = NULL;
     uint64_t size = 3ULL * 1024 * 1024;
     hostAddr = (void *)malloc(size);
-    memset(hostAddr, 0, size);
+    memset(hostAddr, 1, size);
 
     LOG(INFO) << "hostAddr: " << hostAddr << ", len: " << FLAGS_block_size;
 

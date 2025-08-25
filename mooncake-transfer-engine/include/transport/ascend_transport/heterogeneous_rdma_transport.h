@@ -18,8 +18,12 @@
 
 #include "transport/rdma_transport/rdma_transport.h"
 #include "acl/acl.h"
+#include <atomic>
+#include <condition_variable>
 
 #define HUGE_HOST_SIZE 3ULL * 1024 * 1024 * 1024
+#define HUGE_DEVICE_SIZE 8 * 1024 * 1024
+#define HUGE_DEVICE_NUM 4
 
 namespace mooncake {
 
@@ -62,13 +66,43 @@ class HeterogeneousRdmaTransport : public Transport {
                              TransferStatus &status) override;
 
    private:
+    void transfer_Loop();
+
+   private:
+    struct TaskPackage {
+        std::vector<TransferTask *> tasks;
+        uint64_t total_length;
+        uint64_t devId;
+
+        TaskPackage(TaskPackage &&) = default;
+        TaskPackage &operator=(TaskPackage &&) = default;
+
+        TaskPackage(const TaskPackage &) = delete;
+        TaskPackage &operator=(const TaskPackage &) = delete;
+
+        TaskPackage(std::vector<TransferTask *> taskList, uint64_t len,
+                    uint64_t id)
+            : tasks(std::move(taskList)), total_length(len), devId(id) {}
+    };
+    bool running_ = false;
     RdmaTransport *transport_ = nullptr;
     aclrtStream stream_;
     void *hostAddr_ = NULL;
+    void *devAddr_ = NULL;
+    std::vector<void *> hugeDevAddrs;
     int deviceLogicId_;
     bool firstSubmit_ = true;
     std::mutex memcpy_mutex_;
     uint64_t offset_ = 0;
+    std::thread transferThread_;
+    std::queue<TaskPackage> taskQueues_;
+    std::mutex transfer_mutex_;
+    std::condition_variable transfer_cond_;
+    std::atomic<int> task_counter_;
+    int devId_ = 0;
+    std::array<bool, HUGE_DEVICE_NUM> mem_blocks = {false, false, false, false};
+    std::mutex dev_mtx_;
+    std::condition_variable dev_cv_;
 };
 
 using TransferRequest = Transport::TransferRequest;
