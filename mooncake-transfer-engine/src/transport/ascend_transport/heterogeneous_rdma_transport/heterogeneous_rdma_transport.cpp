@@ -20,13 +20,75 @@ HeterogeneousRdmaTransport::HeterogeneousRdmaTransport() {
     transport_ = new RdmaTransport();
 }
 
-HeterogeneousRdmaTransport::~HeterogeneousRdmaTransport() { delete transport_; }
+HeterogeneousRdmaTransport::~HeterogeneousRdmaTransport() { 
+    running_ = false;
+    delete transport_; 
+}
+
+void HeterogeneousRdmaTransport::transfer_Loop() {
+    Status s;
+    aclrtStream stream;
+    int ret = aclrtSetDevice(deviceLogicId_);
+    if (ret) {
+        LOG(ERROR) << "HcclTransport: aclrtSetDevice error, ret: " << ret;
+    }
+
+    ret = aclrtCreateStream(&stream);
+    if (ret) {
+        LOG(ERROR) << "HcclTransport: aclrtCreateStream error, ret: " << ret;
+    }
+
+    while (running_) {
+        std::unique_lock<std::mutex> lock(transfer_mutex_);
+        if (reqQueues_.empty()) {
+            transfer_cond_.wait(lock);
+        }
+
+        auto pkg = std::move(taskQueues_.front());
+        const auto& task_list = pkg.tasks; 
+        taskQueues_.pop();
+        lock.unlock();
+        if (task_list.empty()) {
+            LOG(ERROR) << "HcclTransport: empty transfer request batch";
+        }
+        int total_length = pkg.total_length;
+        if ((offset_ + total_length) >= HUGE_HOST_SIZE) {
+            offset_ = 0;
+        }
+        for (size_t index = 0; index < task_list.size(); ++index) {
+            auto &task = *task_list[index];
+            auto &request = *task.request;
+            request.source = static_cast<char *>(hostAddr_) + offset_;
+            offset_ += request.length;
+        }
+
+        ret = aclrtMemcpyAsync(static_cast<char *>(hostAddr_) + offset_ - total_length,
+                                total_length, hugeDevAddrs[pkg.devId], total_length,
+                                ACL_MEMCPY_DEVICE_TO_HOST, stream_);
+        if (ret) {
+                LOG(ERROR)
+                    << "HeterogeneousRdmaTransport: aclrtMemcpyAsync dtoh error, ret: "
+                    << ret << ", hostAddr: " << hostAddr_x
+                    << ", offset_: " << offset_
+                    << ", deviceAddr: " << hugeDevAddrs[devId]
+                    << "len: " << total_length;
+                return Status::InvalidArgument(
+                    "HeterogeneousRdmaTransport: Exceed the limitation of "
+                    "capacity, batch id: ");
+            }
+        s = transport_->submitTransferTask(task_list);
+        if (!s.ok()) {
+            LOG(ERROR) << "HeterogeneousRdmaTransport: Rdma submitTransferTask error";
+        }
+    }
+}
 
 int HeterogeneousRdmaTransport::install(std::string &local_server_name,
                                         std::shared_ptr<TransferMetadata> meta,
                                         std::shared_ptr<Topology> topo) {
     int ret = 0;
     local_server_name_ = local_server_name;
+    running_ = true;ß
 
     ret = aclrtGetDevice(&deviceLogicId_);
     if (ret) {
@@ -45,6 +107,20 @@ int HeterogeneousRdmaTransport::install(std::string &local_server_name,
         LOG(ERROR) << "HeterogeneousRdmaTransport:transport is null";
         return ret;
     }
+
+    devAddr_ = nullptr;
+    ret = aclrtMalloc(&devAddr, HUGE_DEVICE_NUM * HUGE_DEVICE_NUM, ACL_MEM_MALLOC_HUGE_ONLY);
+    if (ret != ACL_ERROR_NONE) {
+        LOG(ERROR) << "Failed to allocate device memory, ret:" << ret;
+        return ret;
+    }
+
+    for (int i = 0; i < HUGE_DEVICE_NUM; i++) {
+        hugeDevAddrs.push_back(static_cast<char *>(devAddr_) + i * HUGE_DEVICE_SIZE);
+    }
+
+    transferThread_ =
+            std::thread(&HcclTransport::transferLoop, this);
 
     ret = transport_->install(local_server_name_, meta, topo);
     if (ret) {
@@ -138,6 +214,10 @@ int HeterogeneousRdmaTransport::unregisterLocalMemoryBatch(
 
 Status HeterogeneousRdmaTransport::submitTransfer(
     BatchID batch_id, const std::vector<TransferRequest> &entries) {
+    if (entries.empty()) {
+        LOG(ERROR) << "HeterogeneousRdmaTransport: empty transfer request batch";
+        return Status::OK();
+    }
     std::vector<TransferRequest> new_entries;
     new_entries.resize(entries.size());
     int index = 0;
@@ -157,29 +237,29 @@ Status HeterogeneousRdmaTransport::submitTransfer(
         }
         firstSubmit_ = false;
     }
+    aclrtPtrAttributes attributes;
+    ret = aclrtPointerGetAttributes(entries[0].source, &attributes);
+    if (ret) {
+        memcpy_mutex_.unlock();
+        LOG(ERROR) << "aclrtPointrtGetAttributes error, ret: " << ret;
+        return Status::InvalidArgument(
+            "HeterogeneousRdmaTransport: Exceed the limitation of "
+            "capacity, batch id: ");
+    }
 
+    if (attributes.location.type == 0) {
+        return transport_->submitTransfer(batch_id, new_entries);
+    }
     memcpy_mutex_.lock();
+    int offset = 0;
     for (auto &request : entries) {
-        aclrtPtrAttributes attributes;
-        ret = aclrtPointerGetAttributes(request.source, &attributes);
-        if (ret) {
-            memcpy_mutex_.unlock();
-            LOG(ERROR) << "aclrtPointrtGetAttributes error, ret: " << ret;
-            return Status::InvalidArgument(
-                "HeterogeneousRdmaTransport: Exceed the limitation of "
-                "capacity, batch id: ");
-        }
-
-        if (attributes.location.type == 0) {
-            continue;
-        }
         ret = aclrtMemcpyAsync(static_cast<char *>(hostAddr_) + offset_,
-                               request.length, request.source, request.length,
+                               request.length, devAddr_, request.length,
                                ACL_MEMCPY_DEVICE_TO_HOST, stream_);
         if (ret) {
             memcpy_mutex_.unlock();
             LOG(ERROR)
-                << "HeterogeneousRdmaTransport: aclrtMemcpyAsync error, ret: "
+                << "HeterogeneousRdmaTransport: aclrtMemcpyAsync dtoh error, ret: "
                 << ret << ", hostAddr: " << hostAddr_
                 << ", offset_: " << offset_
                 << ", deviceAddr: " << request.source
@@ -188,6 +268,7 @@ Status HeterogeneousRdmaTransport::submitTransfer(
                 "HeterogeneousRdmaTransport: Exceed the limitation of "
                 "capacity, batch id: ");
         }
+        
         new_entries[index] = request;
         new_entries[index].source = static_cast<char *>(hostAddr_) + offset_;
         offset_ += request.length;
@@ -215,6 +296,11 @@ Status HeterogeneousRdmaTransport::submitTransfer(
 Status HeterogeneousRdmaTransport::submitTransferTask(
     const std::vector<TransferTask *> &task_list) {
     aclError ret;
+    if (task_list.empty()) {
+        LOG(ERROR) << "HeterogeneousRdmaTransport: empty transfer task list";
+        return Status::OK();
+    }
+
     if (firstSubmit_) {
         ret = aclrtSetDevice(deviceLogicId_);
         if (ret) {
@@ -232,32 +318,45 @@ Status HeterogeneousRdmaTransport::submitTransferTask(
         firstSubmit_ = false;
     }
 
+    auto &task_f = *task_list[0];
+    auto &request_f = *task_f.request;
+    aclrtPtrAttributes attributes;
+    ret = aclrtPointerGetAttributes(request_f.source, &attributes);
+    if (ret) {
+        memcpy_mutex_.unlock();
+        LOG(ERROR) << "aclrtPointrtGetAttributes error, ret: " << ret;
+        return Status::InvalidArgument(
+            "HeterogeneousRdmaTransport: Exceed the limitation of "
+            "capacity, batch id: ");
+    }
+
+    if (attributes.location.type == 0) {
+        return transport_->submitTransferTask(task_list);
+    }
+
     memcpy_mutex_.lock();
+    uint64_t total_length = 0;
+    std::vector<TransferTask*> subTasks;
     for (size_t index = 0; index < task_list.size(); ++index) {
         auto &task = *task_list[index];
         auto &request = *task.request;
-
-        aclrtPtrAttributes attributes;
-        ret = aclrtPointerGetAttributes(request.source, &attributes);
-        if (ret) {
-            memcpy_mutex_.unlock();
-            LOG(ERROR) << "aclrtPointrtGetAttributes error, ret: " << ret;
-            return Status::InvalidArgument(
-                "HeterogeneousRdmaTransport: Exceed the limitation of "
-                "capacity, batch id: ");
+        total_length += request.length;
+        if (total_length >= HUGE_DEVICE_LIMIT) {
+            std::unique_lock<std::mutex> lock(transfer_mutex_);
+            taskQueues_.emplace(std::move(subTasks), total_length - request.length, devId_);
+            lock.unlock();
+            transfer_cond_.notify_one();
+            subTasks.clear();
+            total_length = request.length;
+            devId_ = (devId_ + 1) & (HUGE_DEVICE_NUM - 1);
         }
-
-        if (attributes.location.type == 0) {
-            continue;
-        }
-
-        ret = aclrtMemcpyAsync(static_cast<char *>(hostAddr_) + offset_,
+        ret = aclrtMemcpyAsync(static_cast<char *>(hugeDevAddrs[devId_]) + total_length,
                                request.length, request.source, request.length,
-                               ACL_MEMCPY_DEVICE_TO_HOST, stream_);
+                               ACL_MEMCPY_DEVICE_TO_DEVICE, stream_);
         if (ret) {
             memcpy_mutex_.unlock();
             LOG(ERROR)
-                << "HeterogeneousRdmaTransport: aclrtMemcpyAsync error, ret: "
+                << "HeterogeneousRdmaTransport: aclrtMemcpyAsync dtod error, ret: "
                 << ret << ", hostAddr: " << hostAddr_
                 << ", offset_: " << offset_
                 << ", deviceAddr: " << request.source
@@ -266,11 +365,7 @@ Status HeterogeneousRdmaTransport::submitTransferTask(
                 "HeterogeneousRdmaTransport: Exceed the limitation of "
                 "capacity, batch id: ");
         }
-        request.source = static_cast<char *>(hostAddr_) + offset_;
-        offset_ += request.length;
-        if (offset_ >= HUGE_HOST_SIZE) {
-            offset_ = 0;
-        }
+        subTasks.push_back(task_list[index]);
     }
 
     ret = aclrtSynchronizeStream(stream_);
@@ -285,7 +380,7 @@ Status HeterogeneousRdmaTransport::submitTransferTask(
     }
     memcpy_mutex_.unlock();
 
-    return transport_->submitTransferTask(task_list);
+    return Status::OK();
 }
 
 Status HeterogeneousRdmaTransport::getTransferStatus(

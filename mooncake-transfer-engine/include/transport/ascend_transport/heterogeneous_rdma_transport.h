@@ -20,11 +20,15 @@
 #include "acl/acl.h"
 
 #define HUGE_HOST_SIZE 3ULL * 1024 * 1024 * 1024
+#define HUGE_DEVICE_SIZE 8 * 1024 * 1024
+#define HUGE_DEVICE_LIMIT HUGE_DEVICE_SIZE - 512 * 1024
+#define HUGE_DEVICE_NUM 4
 
 namespace mooncake {
 
 class HeterogeneousRdmaTransport : public Transport {
    public:
+
     HeterogeneousRdmaTransport();
 
     ~HeterogeneousRdmaTransport();
@@ -60,15 +64,34 @@ class HeterogeneousRdmaTransport : public Transport {
 
     Status getTransferStatus(BatchID batch_id, size_t task_id,
                              TransferStatus &status) override;
-
    private:
+    void transferLoop();
+   private:
+    struct TaskPackage {
+        std::vector<TransferTask*> tasks;
+        uint64_t total_length;
+        uint64_t devId;
+
+        TaskPackage(TaskPackage&&) = default;
+        TaskPackage& operator=(TaskPackage&&) = default;
+
+        TaskPackage(const TaskPackage&) = delete;
+        TaskPackage& operator=(const TaskPackage&) = delete;
+    };
     RdmaTransport *transport_ = nullptr;
     aclrtStream stream_;
     void *hostAddr_ = NULL;
+    void *devAddr_ = NULL;
+    std::vector<void *> hugeDevAddrs;
     int deviceLogicId_;
     bool firstSubmit_ = true;
     std::mutex memcpy_mutex_;
     uint64_t offset_ = 0;
+    std::thread transferThread_;
+    std::queue<TaskPackage> taskQueues_;
+    std::mutex transfer_mutex_;
+    std::condition_variable transfer_cond_;
+    int devId_ = 0;
 };
 
 using TransferRequest = Transport::TransferRequest;
