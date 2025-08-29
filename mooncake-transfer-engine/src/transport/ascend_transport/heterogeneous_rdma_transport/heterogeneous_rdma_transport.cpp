@@ -255,54 +255,62 @@ Status HeterogeneousRdmaTransport::submitTransfer(
     aclrtPtrAttributes attributes;
     ret = aclrtPointerGetAttributes(entries[0].source, &attributes);
     if (ret) {
-        memcpy_mutex_.unlock();
         LOG(ERROR) << "aclrtPointrtGetAttributes error, ret: " << ret;
         return Status::InvalidArgument(
             "HeterogeneousRdmaTransport: Exceed the limitation of "
             "capacity, batch id: ");
     }
 
-    if (attributes.location.type == 0) {
-        return transport_->submitTransfer(batch_id, new_entries);
-    }
-    memcpy_mutex_.lock();
-    for (auto &request : entries) {
-        ret = aclrtMemcpyAsync(static_cast<char *>(hostAddr_) + offset_,
-                               request.length, devAddr_, request.length,
-                               ACL_MEMCPY_DEVICE_TO_HOST, stream_);
+    {
+        std::lock_guard<std::mutex> lock(memcpy_mutex_);
+        for (auto &request : entries) {
+            aclrtPtrAttributes attributes;
+            ret = aclrtPointerGetAttributes(request.source, &attributes);
+            if (ret) {
+                LOG(ERROR) << "aclrtPointrtGetAttributes error, ret: " << ret;
+                return Status::InvalidArgument(
+                    "HeterogeneousRdmaTransport: Exceed the limitation of "
+                    "capacity, batch id: ");
+            }
+
+            if (attributes.location.type == 0) {
+                continue;
+            }
+            ret =
+                aclrtMemcpyAsync(static_cast<char *>(hostAddr_) + offset_,
+                                 request.length, request.source, request.length,
+                                 ACL_MEMCPY_DEVICE_TO_HOST, stream_);
+            if (ret) {
+                LOG(ERROR) << "HeterogeneousRdmaTransport: aclrtMemcpyAsync "
+                              "error, ret: "
+                           << ret << ", hostAddr: " << hostAddr_
+                           << ", offset_: " << offset_
+                           << ", deviceAddr: " << request.source
+                           << "len: " << request.length;
+                return Status::InvalidArgument(
+                    "HeterogeneousRdmaTransport: Exceed the limitation of "
+                    "capacity, batch id: ");
+            }
+            new_entries[index] = request;
+            new_entries[index].source =
+                static_cast<char *>(hostAddr_) + offset_;
+            offset_ += request.length;
+            if (offset_ >= HUGE_HOST_SIZE) {
+                offset_ = 0;
+            }
+        }
+
+        ret = aclrtSynchronizeStream(stream_);
         if (ret) {
-            memcpy_mutex_.unlock();
-            LOG(ERROR) << "HeterogeneousRdmaTransport: aclrtMemcpyAsync dtoh "
+            LOG(ERROR) << "HeterogeneousRdmaTransport: aclrtSynchronizeStream "
                           "error, ret: "
-                       << ret << ", hostAddr: " << hostAddr_
-                       << ", offset_: " << offset_
-                       << ", deviceAddr: " << request.source
-                       << "len: " << request.length;
+                       << ret;
             return Status::InvalidArgument(
                 "HeterogeneousRdmaTransport: Exceed the limitation of "
-                "capacity, batch id: ");
-        }
-
-        new_entries[index] = request;
-        new_entries[index].source = static_cast<char *>(hostAddr_) + offset_;
-        offset_ += request.length;
-        if (offset_ >= HUGE_HOST_SIZE) {
-            offset_ = 0;
+                "capacity, "
+                "batch id: ");
         }
     }
-
-    ret = aclrtSynchronizeStream(stream_);
-    if (ret) {
-        memcpy_mutex_.unlock();
-        LOG(ERROR)
-            << "HeterogeneousRdmaTransport: aclrtSynchronizeStream error, ret: "
-            << ret;
-        return Status::InvalidArgument(
-            "HeterogeneousRdmaTransport: Exceed the limitation of capacity, "
-            "batch id: ");
-    }
-
-    memcpy_mutex_.unlock();
 
     return transport_->submitTransfer(batch_id, new_entries);
 }
@@ -347,59 +355,59 @@ Status HeterogeneousRdmaTransport::submitTransferTask(
         return transport_->submitTransferTask(task_list);
     }
 
-    memcpy_mutex_.lock();
     uint64_t total_length = 0;
     std::vector<TransferTask *> subTasks;
     uint64_t index = 0;
     int cnt = 0;
-    while (index < task_list.size()) {
-        std::unique_lock<std::mutex> lock_dev(dev_mtx_);
-        dev_cv_.wait(lock_dev, [&] { return !mem_blocks[devId_]; });
-        mem_blocks[devId_] = true;
-        lock_dev.unlock();
+    {
+        std::lock_guard<std::mutex> lock(memcpy_mutex_);
         while (index < task_list.size()) {
-            auto &task = *task_list[index];
-            auto &request = *task.request;
-            if (total_length + request.length > HUGE_DEVICE_SIZE) {
-                break;
+            std::unique_lock<std::mutex> lock_dev(dev_mtx_);
+            dev_cv_.wait(lock_dev, [&] { return !mem_blocks[devId_]; });
+            mem_blocks[devId_] = true;
+            lock_dev.unlock();
+            while (index < task_list.size()) {
+                auto &task = *task_list[index];
+                auto &request = *task.request;
+                if (total_length + request.length > HUGE_DEVICE_SIZE) {
+                    break;
+                }
+                ret = aclrtMemcpyAsync(
+                    static_cast<char *>(hugeDevAddrs[devId_]) + total_length,
+                    request.length, request.source, request.length,
+                    ACL_MEMCPY_DEVICE_TO_DEVICE, stream_);
+                if (ret) {
+                    LOG(ERROR)
+                        << "HeterogeneousRdmaTransport: aclrtMemcpyAsync dtod "
+                           "error, ret: "
+                        << ret << ", hostAddr: " << hostAddr_
+                        << ", offset_: " << offset_
+                        << ", deviceAddr: " << request.source
+                        << ", len: " << request.length;
+                    return Status::InvalidArgument(
+                        "HeterogeneousRdmaTransport: Exceed the limitation of "
+                        "capacity, batch id: ");
+                }
+                subTasks.push_back(task_list[index]);
+                ++index;
+                total_length += request.length;
             }
-            ret = aclrtMemcpyAsync(
-                static_cast<char *>(hugeDevAddrs[devId_]) + total_length,
-                request.length, request.source, request.length,
-                ACL_MEMCPY_DEVICE_TO_DEVICE, stream_);
-            if (ret) {
-                memcpy_mutex_.unlock();
-                LOG(ERROR)
-                    << "HeterogeneousRdmaTransport: aclrtMemcpyAsync dtod "
-                       "error, ret: "
-                    << ret << ", hostAddr: " << hostAddr_
-                    << ", offset_: " << offset_
-                    << ", deviceAddr: " << request.source
-                    << ", len: " << request.length;
-                return Status::InvalidArgument(
-                    "HeterogeneousRdmaTransport: Exceed the limitation of "
-                    "capacity, batch id: ");
-            }
-            subTasks.push_back(task_list[index]);
-            ++index;
-            total_length += request.length;
-        }
 
-        std::unique_lock<std::mutex> lock(transfer_mutex_);
-        taskQueues_.emplace(std::move(subTasks), total_length, devId_);
-        lock.unlock();
-        transfer_cond_.notify_one();
-        subTasks.clear();
-        total_length = 0;
-        devId_ = (devId_ + 1) & (HUGE_DEVICE_NUM - 1);
-        cnt++;
+            std::unique_lock<std::mutex> lock(transfer_mutex_);
+            taskQueues_.emplace(std::move(subTasks), total_length, devId_);
+            lock.unlock();
+            transfer_cond_.notify_one();
+            subTasks.clear();
+            total_length = 0;
+            devId_ = (devId_ + 1) & (HUGE_DEVICE_NUM - 1);
+            cnt++;
+        }
     }
-    memcpy_mutex_.unlock();
 
     while (task_counter_.load() < cnt) {
         std::this_thread::yield();
     }
-    
+
     task_counter_.fetch_sub(cnt);
 
     return Status::OK();
