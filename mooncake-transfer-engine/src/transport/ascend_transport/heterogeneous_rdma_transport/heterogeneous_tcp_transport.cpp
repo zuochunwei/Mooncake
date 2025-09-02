@@ -13,15 +13,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "transport/ascend_transport/heterogeneous_transport/heterogeneous_rdma_transport.h"
+#include "transport/ascend_transport/heterogeneous_transport/heterogeneous_tcp_transport.h"
 
 namespace mooncake {
-HeterogeneousRdmaTransport::HeterogeneousRdmaTransport()
+HeterogeneousTcpTransport::HeterogeneousTcpTransport()
     : transfer_counter_(0) {
-    transport_ = new RdmaTransport();
+    transport_ = new TcpTransport();
 }
 
-HeterogeneousRdmaTransport::~HeterogeneousRdmaTransport() {
+HeterogeneousTcpTransport::~HeterogeneousTcpTransport() {
     running_ = false;
     transfer_cond_.notify_one();
     transferThread_.join();
@@ -32,19 +32,19 @@ HeterogeneousRdmaTransport::~HeterogeneousRdmaTransport() {
     delete transport_;
 }
 
-void HeterogeneousRdmaTransport::transferLoop() {
+void HeterogeneousTcpTransport::transferLoop() {
     Status s;
     aclrtStream stream;
     int ret = aclrtSetDevice(deviceLogicId_);
     if (ret) {
-        LOG(ERROR) << "HeterogeneousRdmaTransport: aclrtSetDevice error, ret: "
+        LOG(ERROR) << "HeterogeneousTcpTransport: aclrtSetDevice error, ret: "
                    << ret;
     }
 
     ret = aclrtCreateStream(&stream);
     if (ret) {
         LOG(ERROR)
-            << "HeterogeneousRdmaTransport: aclrtCreateStream error, ret: "
+            << "HeterogeneousTcpTransport: aclrtCreateStream error, ret: "
             << ret;
     }
 
@@ -60,7 +60,7 @@ void HeterogeneousRdmaTransport::transferLoop() {
         lock.unlock();
         if (task_list.empty()) {
             LOG(ERROR)
-                << "HeterogeneousRdmaTransport: empty transfer task batch";
+                << "HeterogeneousTcpTransport: empty transfer task batch";
             continue;
         }
         int total_length = pkg.total_length;
@@ -71,7 +71,7 @@ void HeterogeneousRdmaTransport::transferLoop() {
                                total_length, hugeDevAddrs[pkg.devId],
                                total_length, ACL_MEMCPY_DEVICE_TO_HOST, stream);
         if (ret) {
-            LOG(ERROR) << "HeterogeneousRdmaTransport: aclrtMemcpyAsync dtoh "
+            LOG(ERROR) << "HeterogeneousTcpTransport: aclrtMemcpyAsync dtoh "
                           "error, ret: "
                        << ret << ", hostAddr: " << hostAddr_
                        << ", offset_: " << offset_
@@ -82,7 +82,7 @@ void HeterogeneousRdmaTransport::transferLoop() {
         }
         ret = aclrtSynchronizeStream(stream);
         if (ret) {
-            LOG(ERROR) << "HeterogeneousRdmaTransport: aclrtSynchronizeStream "
+            LOG(ERROR) << "HeterogeneousTcpTransport: aclrtSynchronizeStream "
                           "error, ret: "
                        << ret;
             transfer_counter_.fetch_add(1);
@@ -102,13 +102,13 @@ void HeterogeneousRdmaTransport::transferLoop() {
         s = transport_->submitTransferTask(task_list);
         if (!s.ok()) {
             LOG(ERROR)
-                << "HeterogeneousRdmaTransport: Rdma submitTransferTask error";
+                << "HeterogeneousTcpTransport: Rdma submitTransferTask error";
         }
         transfer_counter_.fetch_add(1);
     }
 }
 
-int HeterogeneousRdmaTransport::install(std::string &local_server_name,
+int HeterogeneousTcpTransport::install(std::string &local_server_name,
                                         std::shared_ptr<TransferMetadata> meta,
                                         std::shared_ptr<Topology> topo) {
     local_server_name_ = local_server_name;
@@ -116,23 +116,23 @@ int HeterogeneousRdmaTransport::install(std::string &local_server_name,
 
     int ret = aclrtGetDevice(&deviceLogicId_);
     if (ret) {
-        LOG(ERROR) << "HeterogeneousRdmaTransport: aclrtGetDevice failed, ret: "
+        LOG(ERROR) << "HeterogeneousTcpTransport: aclrtGetDevice failed, ret: "
                    << ret;
         return ret;
     }
 
-    LOG(INFO) << "HeterogeneousRdmaTransport: begin to install transport,  "
+    LOG(INFO) << "HeterogeneousTcpTransport: begin to install transport,  "
                  "local_server_name: "
               << local_server_name << "deviceLogicId_: " << deviceLogicId_;
 
     if (transport_ == nullptr) {
-        LOG(ERROR) << "HeterogeneousRdmaTransport:transport is null";
+        LOG(ERROR) << "HeterogeneousTcpTransport:transport is null";
         return ret;
     }
 
     void *hostAddr_ = std::aligned_alloc(64, HUGE_HOST_SIZE);
     if (hostAddr_ == nullptr) {
-        LOG(ERROR) << "HeterogeneousRdmaTransport:hostAddr_ is null, "
+        LOG(ERROR) << "HeterogeneousTcpTransport:hostAddr_ is null, "
                       "aligned_alloc failed";
         return -1;
     }
@@ -150,25 +150,25 @@ int HeterogeneousRdmaTransport::install(std::string &local_server_name,
     }
 
     transferThread_ =
-        std::thread(&HeterogeneousRdmaTransport::transferLoop, this);
+        std::thread(&HeterogeneousTcpTransport::transferLoop, this);
 
     ret = transport_->install(local_server_name_, meta, topo);
     if (ret) {
-        LOG(ERROR) << "HeterogeneousRdmaTransport::RdmaTransport install error, ret: " << ret;
+        LOG(ERROR) << "HeterogeneousTcpTransport::RdmaTransport install error, ret: " << ret;
         return ret;
     }
     ret = transport_->registerLocalMemory(hostAddr_, HUGE_HOST_SIZE, "cpu",
                                           true, true);
     if (ret) {
         LOG(ERROR)
-            << "HeterogeneousRdmaTransport: registerLocalMemory error, ret: "
+            << "HeterogeneousTcpTransport: registerLocalMemory error, ret: "
             << ret;
         return ret;
     }
     return ret;
 }
 
-int HeterogeneousRdmaTransport::registerLocalMemory(void *addr, size_t length,
+int HeterogeneousTcpTransport::registerLocalMemory(void *addr, size_t length,
                                                     const std::string &name,
                                                     bool remote_accessible,
                                                     bool update_metadata) {
@@ -190,7 +190,7 @@ int HeterogeneousRdmaTransport::registerLocalMemory(void *addr, size_t length,
     return 0;
 }
 
-int HeterogeneousRdmaTransport::unregisterLocalMemory(void *addr,
+int HeterogeneousTcpTransport::unregisterLocalMemory(void *addr,
                                                       bool update_metadata) {
     aclrtPtrAttributes attributes;
     int ret = aclrtPointerGetAttributes(addr, &attributes);
@@ -210,14 +210,14 @@ int HeterogeneousRdmaTransport::unregisterLocalMemory(void *addr,
     return 0;
 }
 
-int HeterogeneousRdmaTransport::registerLocalMemoryBatch(
-    const std::vector<HeterogeneousRdmaTransport::BufferEntry> &buffer_list,
+int HeterogeneousTcpTransport::registerLocalMemoryBatch(
+    const std::vector<HeterogeneousTcpTransport::BufferEntry> &buffer_list,
     const std::string &location) {
     for (auto &buffer : buffer_list) {
         int ret = registerLocalMemory(buffer.addr, buffer.length, location,
                                       true, false);
         if (ret) {
-            LOG(ERROR) << "HeterogeneousRdmaTransport registerLocalMemoryBatch "
+            LOG(ERROR) << "HeterogeneousTcpTransport registerLocalMemoryBatch "
                           "error, ret: "
                        << ret;
             return ret;
@@ -226,12 +226,12 @@ int HeterogeneousRdmaTransport::registerLocalMemoryBatch(
     return metadata_->updateLocalSegmentDesc();
 }
 
-int HeterogeneousRdmaTransport::unregisterLocalMemoryBatch(
+int HeterogeneousTcpTransport::unregisterLocalMemoryBatch(
     const std::vector<void *> &addr_list) {
     for (auto &addr : addr_list) {
         int ret = unregisterLocalMemory(addr, false);
         if (ret) {
-            LOG(ERROR) << "HeterogeneousRdmaTransport "
+            LOG(ERROR) << "HeterogeneousTcpTransport "
                           "unregisterLocalMemoryBatch error, ret: "
                        << ret;
             return ret;
@@ -240,19 +240,19 @@ int HeterogeneousRdmaTransport::unregisterLocalMemoryBatch(
     return metadata_->updateLocalSegmentDesc();
 }
 
-int HeterogeneousRdmaTransport::createStream() {
+int HeterogeneousTcpTransport::createStream() {
     if (firstSubmit_) {
         int ret = aclrtSetDevice(deviceLogicId_);
         if (ret) {
             LOG(ERROR)
-                << "HeterogeneousRdmaTransport: aclrtSetDevice failed ret: "
+                << "HeterogeneousTcpTransport: aclrtSetDevice failed ret: "
                 << ret;
             return ret;
         }
         ret = aclrtCreateStream(&stream_);
         if (ret) {
             LOG(ERROR)
-                << "HeterogeneousRdmaTransport: aclrtCreateStream error, ret: "
+                << "HeterogeneousTcpTransport: aclrtCreateStream error, ret: "
                 << ret;
             return ret;
         }
@@ -261,11 +261,11 @@ int HeterogeneousRdmaTransport::createStream() {
     return 0;
 }
 
-Status HeterogeneousRdmaTransport::submitTransfer(
+Status HeterogeneousTcpTransport::submitTransfer(
     BatchID batch_id, const std::vector<TransferRequest> &entries) {
     if (entries.empty()) {
         LOG(ERROR)
-            << "HeterogeneousRdmaTransport: empty transfer request batch";
+            << "HeterogeneousTcpTransport: empty transfer request batch";
         return Status::OK();
     }
     std::vector<TransferRequest> new_entries;
@@ -274,17 +274,17 @@ Status HeterogeneousRdmaTransport::submitTransfer(
     int ret;
     ret = createStream();
     if (ret) {
-        LOG(ERROR) << "HeterogeneousRdmaTransport: createStream error, ret: "
+        LOG(ERROR) << "HeterogeneousTcpTransport: createStream error, ret: "
                    << ret;
         return Status::InvalidArgument(
-            "HeterogeneousRdmaTransport: createStream error");
+            "HeterogeneousTcpTransport: createStream error");
     }
     aclrtPtrAttributes attributes;
     ret = aclrtPointerGetAttributes(entries[0].source, &attributes);
     if (ret) {
         LOG(ERROR) << "aclrtPointerGetAttributes error, ret: " << ret;
         return Status::InvalidArgument(
-            "HeterogeneousRdmaTransport: aclrtPointerGetAttributes error");
+            "HeterogeneousTcpTransport: aclrtPointerGetAttributes error");
     }
 
     if (attributes.location.type == 0) {
@@ -302,14 +302,14 @@ Status HeterogeneousRdmaTransport::submitTransfer(
                                  request.length, request.source, request.length,
                                  ACL_MEMCPY_DEVICE_TO_HOST, stream_);
             if (ret) {
-                LOG(ERROR) << "HeterogeneousRdmaTransport: aclrtMemcpyAsync "
+                LOG(ERROR) << "HeterogeneousTcpTransport: aclrtMemcpyAsync "
                               "error, ret: "
                            << ret << ", hostAddr: " << hostAddr_
                            << ", offset_: " << offset_
                            << ", deviceAddr: " << request.source
                            << "len: " << request.length;
                 return Status::InvalidArgument(
-                    "HeterogeneousRdmaTransport: aclrtMemcpyAsync error");
+                    "HeterogeneousTcpTransport: aclrtMemcpyAsync error");
             }
             new_entries[index] = request;
             new_entries[index].source =
@@ -319,31 +319,31 @@ Status HeterogeneousRdmaTransport::submitTransfer(
 
         ret = aclrtSynchronizeStream(stream_);
         if (ret) {
-            LOG(ERROR) << "HeterogeneousRdmaTransport: aclrtSynchronizeStream "
+            LOG(ERROR) << "HeterogeneousTcpTransport: aclrtSynchronizeStream "
                           "error, ret: "
                        << ret;
             return Status::InvalidArgument(
-                "HeterogeneousRdmaTransport: aclrtSynchronizeStream error");
+                "HeterogeneousTcpTransport: aclrtSynchronizeStream error");
         }
     }
 
     return transport_->submitTransfer(batch_id, new_entries);
 }
 
-Status HeterogeneousRdmaTransport::submitTransferTask(
+Status HeterogeneousTcpTransport::submitTransferTask(
     const std::vector<TransferTask *> &task_list) {
     int ret;
     if (task_list.empty()) {
-        LOG(ERROR) << "HeterogeneousRdmaTransport: empty transfer task list";
+        LOG(ERROR) << "HeterogeneousTcpTransport: empty transfer task list";
         return Status::OK();
     }
 
     ret = createStream();
     if (ret) {
-        LOG(ERROR) << "HeterogeneousRdmaTransport: createStream error, ret: "
+        LOG(ERROR) << "HeterogeneousTcpTransport: createStream error, ret: "
                    << ret;
         return Status::InvalidArgument(
-            "HeterogeneousRdmaTransport: createStream error");
+            "HeterogeneousTcpTransport: createStream error");
     }
 
     auto &task_f = *task_list[0];
@@ -353,7 +353,7 @@ Status HeterogeneousRdmaTransport::submitTransferTask(
     if (ret) {
         LOG(ERROR) << "aclrtPointerGetAttributes error, ret: " << ret;
         return Status::InvalidArgument(
-            "HeterogeneousRdmaTransport: aclrtPointerGetAttributes error");
+            "HeterogeneousTcpTransport: aclrtPointerGetAttributes error");
     }
 
     if (attributes.location.type == 0) {
@@ -383,13 +383,13 @@ Status HeterogeneousRdmaTransport::submitTransferTask(
                     ACL_MEMCPY_DEVICE_TO_DEVICE, stream_);
                 if (ret) {
                     LOG(ERROR)
-                        << "HeterogeneousRdmaTransport: aclrtMemcpyAsync dtod "
+                        << "HeterogeneousTcpTransport: aclrtMemcpyAsync dtod "
                            "error, ret: "
                         << ret << ", offset_: " << offset_
                         << ", deviceAddr: " << request.source
                         << ", len: " << request.length;
                     return Status::InvalidArgument(
-                        "HeterogeneousRdmaTransport: aclrtMemcpyAsync dtod "
+                        "HeterogeneousTcpTransport: aclrtMemcpyAsync dtod "
                         "error");
                 }
                 subTasks.push_back(task_list[index]);
@@ -417,12 +417,12 @@ Status HeterogeneousRdmaTransport::submitTransferTask(
     return Status::OK();
 }
 
-Status HeterogeneousRdmaTransport::getTransferStatus(
+Status HeterogeneousTcpTransport::getTransferStatus(
     BatchID batch_id, std::vector<TransferStatus> &status) {
     return transport_->getTransferStatus(batch_id, status);
 }
 
-Status HeterogeneousRdmaTransport::getTransferStatus(BatchID batch_id,
+Status HeterogeneousTcpTransport::getTransferStatus(BatchID batch_id,
                                                      size_t task_id,
                                                      TransferStatus &status) {
     return transport_->getTransferStatus(batch_id, task_id, status);
