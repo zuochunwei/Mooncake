@@ -65,28 +65,28 @@ class HeterogeneousTcpTransport : public Transport {
 
     Status getTransferStatus(BatchID batch_id, size_t task_id,
                              TransferStatus &status) override;
+    std::unique_ptr<TcpTransport> transport_{};
 
    private:
     void transferLoop();
 
    private:
-    struct TransferTask {
+    struct TransferTaskTCP {
         std::vector<TransferTask *> tasks;
         uint64_t total_length;
         uint64_t devId;
 
-        TransferTask(TransferTask &&) = default;
-        TransferTask &operator=(TransferTask &&) = default;
+        TransferTaskTCP(TransferTaskTCP &&) = default;
+        TransferTaskTCP &operator=(TransferTaskTCP &&) = default;
 
-        TransferTask(const TransferTask &) = delete;
-        TransferTask &operator=(const TransferTask &) = delete;
+        TransferTaskTCP(const TransferTaskTCP &) = delete;
+        TransferTaskTCP &operator=(const TransferTaskTCP &) = delete;
 
-        TransferTask(std::vector<TransferTask *> taskList, uint64_t len,
+        TransferTaskTCP(std::vector<TransferTask *> taskList, uint64_t len,
                      uint64_t id)
             : tasks(std::move(taskList)), total_length(len), devId(id) {}
     };
     bool running_ = false;
-    TcpTransport *transport_ = nullptr;
     aclrtStream stream_;
     void *hostAddr_ = nullptr;
     void *devAddr_ = nullptr;
@@ -96,10 +96,10 @@ class HeterogeneousTcpTransport : public Transport {
     std::mutex memcpy_mutex_;
     uint64_t offset_ = 0;
     std::thread transferThread_;
-    std::queue<TransferTask> transferQueues_;
+    std::queue<TransferTaskTCP> transferQueues_;
     std::mutex transfer_mutex_;
     std::condition_variable transfer_cond_;
-    std::atomic<int> transfer_counter_;
+    std::atomic<int> transfer_counter_{0};
     int devId_ = 0;
     std::array<bool, HUGE_DEVICE_NUM> mem_blocks = {false, false, false, false};
     std::mutex dev_mtx_;

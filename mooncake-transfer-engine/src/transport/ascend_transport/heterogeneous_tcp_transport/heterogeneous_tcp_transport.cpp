@@ -17,8 +17,7 @@
 
 namespace mooncake {
 HeterogeneousTcpTransport::HeterogeneousTcpTransport()
-    : transfer_counter_(0) {
-    transport_ = new TcpTransport();
+    : transport_(std::make_unique<TcpTransport>())  {
 }
 
 HeterogeneousTcpTransport::~HeterogeneousTcpTransport() {
@@ -29,7 +28,6 @@ HeterogeneousTcpTransport::~HeterogeneousTcpTransport() {
     aclrtFree(devAddr_);
     hostAddr_ = nullptr;
     devAddr_ = nullptr;
-    delete transport_;
 }
 
 void HeterogeneousTcpTransport::transferLoop() {
@@ -130,7 +128,7 @@ int HeterogeneousTcpTransport::install(std::string &local_server_name,
         return ret;
     }
 
-    void *hostAddr_ = std::aligned_alloc(64, HUGE_HOST_SIZE);
+    hostAddr_ = std::aligned_alloc(64, HUGE_HOST_SIZE);
     if (hostAddr_ == nullptr) {
         LOG(ERROR) << "HeterogeneousTcpTransport:hostAddr_ is null, "
                       "aligned_alloc failed";
@@ -179,7 +177,7 @@ int HeterogeneousTcpTransport::registerLocalMemory(void *addr, size_t length,
         return ret;
     }
 
-    if (attributes.location.type == 0) {
+    if (attributes.location.type != 1) {
         ret = transport_->registerLocalMemory(addr, length, "cpu", true, true);
         if (ret) {
             LOG(ERROR) << "rdma transport registerLocalMemory error, ret: "
@@ -199,7 +197,7 @@ int HeterogeneousTcpTransport::unregisterLocalMemory(void *addr,
         return ret;
     }
 
-    if (attributes.location.type == 0) {
+    if (attributes.location.type != 1) {
         ret = transport_->unregisterLocalMemory(addr, true);
         if (ret) {
             LOG(ERROR) << "rdma transport unregisterLocalMemory error, ret: "
@@ -287,8 +285,8 @@ Status HeterogeneousTcpTransport::submitTransfer(
             "HeterogeneousTcpTransport: aclrtPointerGetAttributes error");
     }
 
-    if (attributes.location.type == 0) {
-        return transport_->submitTransferTask(task_list);
+    if (attributes.location.type != 1) {
+        return transport_->submitTransfer(batch_id, entries);
     }
 
     {
@@ -349,14 +347,14 @@ Status HeterogeneousTcpTransport::submitTransferTask(
     auto &task_f = *task_list[0];
     auto &request_f = *task_f.request;
     aclrtPtrAttributes attributes;
-    ret = aclrtPointerGetAttributes(entries[0].source, &attributes);
+    ret = aclrtPointerGetAttributes(request_f.source, &attributes);
     if (ret) {
         LOG(ERROR) << "aclrtPointerGetAttributes error, ret: " << ret;
         return Status::InvalidArgument(
             "HeterogeneousTcpTransport: aclrtPointerGetAttributes error");
     }
 
-    if (attributes.location.type == 0) {
+    if (attributes.location.type != 1) {
         return transport_->submitTransferTask(task_list);
     }
 
@@ -415,11 +413,6 @@ Status HeterogeneousTcpTransport::submitTransferTask(
     transfer_counter_.fetch_sub(usedHugeDevNum);
 
     return Status::OK();
-}
-
-Status HeterogeneousTcpTransport::getTransferStatus(
-    BatchID batch_id, std::vector<TransferStatus> &status) {
-    return transport_->getTransferStatus(batch_id, status);
 }
 
 Status HeterogeneousTcpTransport::getTransferStatus(BatchID batch_id,

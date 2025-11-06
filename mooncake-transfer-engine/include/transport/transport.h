@@ -200,7 +200,7 @@ class Transport {
         BatchID batch_id = 0;
 
         // record the origin request
-#ifdef USE_ASCEND_HETEROGENEOUS
+#if defined(USE_ASCEND_HETEROGENEOUS) || defined(USE_ASCEND_HETEROGENEOUS_TCP)
         // need to modify the request's source address, changing it from an NPU
         // address to a CPU address.
         TransferRequest *request = nullptr;
