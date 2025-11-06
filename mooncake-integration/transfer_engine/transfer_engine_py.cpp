@@ -119,12 +119,16 @@ int TransferEnginePy::initializeExt(const char *local_hostname,
     engine_ = std::make_unique<TransferEngine>(true, device_filter);
     if (getenv("MC_LEGACY_RPC_PORT_BINDING")) {
         auto hostname_port = parseHostNameWithPort(local_hostname);
+        LOG(INFO) << "init FLAGS_metadata_server: " << conn_string << ", local server name: " << local_hostname
+               << "hostname_port:" <<  hostname_port.first.c_str() <<", port:" << hostname_port.second;
         int ret =
             engine_->init(conn_string, local_hostname,
                           hostname_port.first.c_str(), hostname_port.second);
         if (ret) return -1;
     } else {
         // the last two params are unused
+        LOG(INFO) << "init FLAGS_metadata_server: " << conn_string << ", local server name: " << local_hostname
+               << "hostname_port:" << ", port:0";
         int ret = engine_->init(conn_string, local_hostname, "", 0);
         if (ret) return -1;
     }
@@ -258,6 +262,7 @@ int TransferEnginePy::transferSync(const char *target_hostname,
                                    uintptr_t buffer,
                                    uintptr_t peer_buffer_address, size_t length,
                                    TransferOpcode opcode) {
+    LOG(INFO) << "target host name:" << target_hostname;
     pybind11::gil_scoped_release release;
     Transport::SegmentHandle handle;
     {
@@ -292,7 +297,7 @@ int TransferEnginePy::transferSync(const char *target_hostname,
         entry.target_id = handle;
         entry.target_offset = peer_buffer_address;
         entry.advise_retry_cnt = retry;
-
+        LOG(INFO) << "submitTransfer start target host name:" << target_hostname << ", local:" << buffer << ", remote:" << peer_buffer_address;
         Status s = engine_->submitTransfer(batch_id, {entry});
         if (!s.ok()) return -1;
 

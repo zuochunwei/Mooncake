@@ -177,6 +177,8 @@ int initiator() {
     auto hostname_port = parseHostNameWithPort(FLAGS_local_server_name);
     engine->init(FLAGS_metadata_server, FLAGS_local_server_name.c_str(),
                  hostname_port.first.c_str(), hostname_port.second);
+    LOG(INFO) << "init FLAGS_metadata_server: " << FLAGS_metadata_server << ", local server name: " << FLAGS_local_server_name.c_str()
+               << "hostname_port:" << hostname_port.first.c_str() << ", port:" << hostname_port.second;
     Transport *xport = nullptr;
     auto nic_priority_matrix = loadNicPriorityMatrix();
     void **args = (void **)malloc(2 * sizeof(void *));

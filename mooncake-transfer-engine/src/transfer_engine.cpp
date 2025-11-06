@@ -240,6 +240,7 @@ int TransferEngine::init(const std::string &metadata_conn_string,
                 return -1;
             }
         } else {
+            LOG(INFO) << "install TCP transport start";
             Transport *tcp_transport =
                 multi_transports_->installTransport("tcp", nullptr);
             if (!tcp_transport) {

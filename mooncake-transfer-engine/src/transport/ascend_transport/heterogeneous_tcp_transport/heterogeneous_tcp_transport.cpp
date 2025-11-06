@@ -78,6 +78,7 @@ void HeterogeneousTcpTransport::transferLoop() {
             transfer_counter_.fetch_add(1);
             continue;
         }
+        LOG(INFO) << "HeterogeneousTcpTransport aclrtMemcpyAsync dtoh ok";
         ret = aclrtSynchronizeStream(stream);
         if (ret) {
             LOG(ERROR) << "HeterogeneousTcpTransport: aclrtSynchronizeStream "
@@ -163,6 +164,7 @@ int HeterogeneousTcpTransport::install(std::string &local_server_name,
             << ret;
         return ret;
     }
+    LOG(INFO) << "HeterogeneousTcpTransport install ok";
     return ret;
 }
 
